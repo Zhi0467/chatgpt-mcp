@@ -1,6 +1,6 @@
 [project]
 name = "chatgpt-mcp"
-version = "1.2.0"
+version = "1.2.1"
 description = "A Model Context Protocol server for interacting with ChatGPT on macOS with Korean support"
 readme = "README.md"
 authors = [

@@ -32,7 +32,7 @@ def is_conversation_complete() -> bool:
         return False
 
 
-def wait_for_response_completion(max_wait_time: int = 300, check_interval: float = 3) -> bool:
+def wait_for_response_completion(max_wait_time: int = 300, check_interval: float = 2) -> bool:
     """Wait for ChatGPT response to complete.
     
     Args:
@@ -56,23 +56,16 @@ def get_current_conversation_text() -> str:
     """Get the current conversation text from ChatGPT.
     
     Returns:
-        Current conversation text
+        Current conversation text (last 5 messages)
     """
     try:
         automation = ChatGPTAutomation()
-        screen_data = automation.read_screen_content()
+        last_messages = automation.get_last_messages(count=5)
         
-        if screen_data.get("status") == "success":
-            texts = screen_data.get("texts", [])
-            current_content = "\n".join(texts)
-            
-            # Clean up UI text
-            cleaned_result = current_content.strip()
-            cleaned_result = cleaned_result.replace('Regenerate', '').replace('Continue generating', '').replace('▍', '').strip()
-            
-            return cleaned_result if cleaned_result else "No response received from ChatGPT."
+        if last_messages:
+            return last_messages
         else:
-            return "Failed to read ChatGPT screen."
+            return "No response received from ChatGPT."
             
     except Exception as e:
         return f"Error reading conversation: {str(e)}"

@@ -6,7 +6,7 @@ import os
 
 class ChatGPTAutomation:
     def __init__(self):
-        self.applescript_path = os.path.join(os.path.dirname(__file__), 'read_chatgpt_screen.applescript')
+        self.read_screen_applescript_path = os.path.join(os.path.dirname(__file__), 'read_chatgpt_screen.applescript')
         
     def activate_chatgpt(self):
         """ChatGPT Desktop 앱 활성화"""
@@ -95,7 +95,7 @@ class ChatGPTAutomation:
         """AppleScript를 사용해서 ChatGPT 화면 내용 읽기"""
         try:
             result = subprocess.run(
-                ['osascript', self.applescript_path],
+                ['osascript', self.read_screen_applescript_path],
                 capture_output=True,
                 text=True
             )
@@ -113,6 +113,49 @@ class ChatGPTAutomation:
                 
         except Exception as e:
             return {"status": "error", "message": str(e)}
+    
+    def get_last_messages(self, count=5):
+        """ChatGPT의 마지막 N개 메시지 추출
+        
+        Args:
+            count: 가져올 메시지 개수 (기본값: 5)
+        
+        Returns:
+            마지막 메시지들의 리스트 또는 하나의 문자열로 합친 텍스트
+        """
+        try:
+            # 전체 화면 내용 읽기
+            screen_data = self.read_screen_content()
+            
+            if screen_data.get("status") != "success":
+                return None
+            
+            texts = screen_data.get("texts", [])
+            if not texts:
+                return None
+            
+            # UI 요소들을 필터링
+            ui_elements = {"Regenerate", "Continue generating", "◍", "", " "}
+            
+            # UI가 아닌 실제 대화 내용만 필터링
+            filtered_messages = []
+            for text in texts:
+                text = text.strip()
+                if text and text not in ui_elements:
+                    filtered_messages.append(text)
+            
+            # 마지막 N개 메시지 가져오기
+            if len(filtered_messages) > count:
+                last_messages = filtered_messages[-count:]
+            else:
+                last_messages = filtered_messages
+            
+            # 메시지들을 하나의 문자열로 합치기
+            return "\n".join(last_messages) if last_messages else None
+            
+        except Exception as e:
+            print(f"[DEBUG] Error in get_last_messages: {e}")
+            return None
 
 
 async def check_chatgpt_access() -> bool:
