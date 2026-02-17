@@ -42,6 +42,41 @@ claude mcp add chatgpt-mcp uvx chatgpt-mcp
 
 That's it! You can start using ChatGPT commands in Claude Code.
 
+## For Codex Users
+
+Use a stable local install path instead of a transient `uvx` cache path.
+
+### Step 1: Install the MCP server in a dedicated venv
+
+```bash
+python3 -m venv ~/.local/opt/chatgpt-mcp
+~/.local/opt/chatgpt-mcp/bin/pip install "git+https://github.com/<your-github-user>/chatgpt-mcp.git@<commit-or-tag>"
+```
+
+### Step 2: Configure Codex (`~/.codex/config.toml`)
+
+```toml
+[mcp_servers.chatgpt]
+command = "/Users/<your-user>/.local/opt/chatgpt-mcp/bin/chatgpt-mcp"
+args = []
+tool_timeout_sec = 300
+```
+
+### Step 3: Restart Codex
+
+Codex must be restarted after config changes so the new MCP command is loaded.
+
+### Step 4: Verify MCP wiring
+
+```bash
+codex mcp get chatgpt
+```
+
+Then run a tiny tool call in Codex such as:
+- `Reply with exactly: OK.`
+
+If you still see transport disconnects, capture fresh MCP stderr from the failing run and confirm the configured command path still exists.
+
 ## For Other MCP Clients
 
 ### Step 1: Install the MCP Server
