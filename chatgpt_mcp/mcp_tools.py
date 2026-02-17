@@ -4,85 +4,104 @@ from mcp.server.fastmcp import FastMCP
 from chatgpt_mcp.chatgpt_automation import ChatGPTAutomation, check_chatgpt_access
 
 
-def is_conversation_complete() -> bool:
-    """Check if ChatGPT conversation is complete using external AppleScript.
-    
-    Returns:
-        True if conversation is complete, False if still in progress
-    """
-    try:
-        automation = ChatGPTAutomation()
-        screen_data = automation.read_screen_content()
-        
-        if screen_data.get("status") == "success":
-            indicators = screen_data.get("indicators", {})
-            
-            # Simple check: only use conversationComplete indicator
-            result = indicators.get("conversationComplete", False)
-            print(f"[DEBUG] is_conversation_complete: {result}, indicators: {indicators}")
-            return result
-        else:
-            print(f"[DEBUG] Screen read failed: {screen_data}")
-            # If we can't read the screen, assume not complete for safety
-            return False
-            
-    except Exception as e:
-        print(f"[DEBUG] Exception in is_conversation_complete: {e}")
-        # If any error occurs, assume not complete for safety
-        return False
+def _read_screen_data() -> dict:
+    """Read raw UI data from ChatGPT."""
+    automation = ChatGPTAutomation()
+    return automation.read_screen_content()
 
 
-def wait_for_response_completion(max_wait_time: int = 300, check_interval: float = 2) -> bool:
-    """Wait for ChatGPT response to complete.
-    
-    Args:
-        max_wait_time: Maximum time to wait in seconds
-        check_interval: How often to check for completion in seconds
-        
-    Returns:
-        True if response completed within time limit, False if timed out
+def _conversation_text_from_data(screen_data: dict) -> str:
+    """Convert screen data into a single text snapshot."""
+    if screen_data.get("status") != "success":
+        return ""
+    texts = screen_data.get("texts", [])
+    return "\n".join(texts).strip()
+
+
+def wait_for_response_completion(
+    previous_snapshot: str = "",
+    max_wait_time: int = 120,
+    check_interval: float = 1.5,
+    stable_cycles_required: int = 2,
+) -> bool:
+    """Wait until a new response appears and stabilizes.
+
+    The original completion detector is brittle across app/localization changes.
+    Instead, wait for conversation text to change from the pre-send snapshot and
+    then remain stable for a few polling cycles without a typing cursor.
     """
     start_time = time.time()
-    
+    saw_change = previous_snapshot.strip() == ""
+    last_snapshot = ""
+    stable_cycles = 0
+
     while time.time() - start_time < max_wait_time:
-        if is_conversation_complete():
-            return True
+        screen_data = _read_screen_data()
+        current_snapshot = _conversation_text_from_data(screen_data)
+
+        if not current_snapshot:
+            time.sleep(check_interval)
+            continue
+
+        if not saw_change and current_snapshot != previous_snapshot:
+            saw_change = True
+
+        if not saw_change:
+            time.sleep(check_interval)
+            continue
+
+        if "▍" in current_snapshot:
+            stable_cycles = 0
+        elif current_snapshot == last_snapshot:
+            stable_cycles += 1
+            if stable_cycles >= stable_cycles_required:
+                return True
+        else:
+            stable_cycles = 1
+
+        last_snapshot = current_snapshot
         time.sleep(check_interval)
-    
+
     return False
 
 
 def get_current_conversation_text() -> str:
-    """Get the current conversation text from ChatGPT.
-    
-    Returns:
-        Current conversation text (last 5 messages)
-    """
+    """Get the current conversation text from ChatGPT."""
     try:
-        automation = ChatGPTAutomation()
-        last_messages = automation.get_last_messages(count=5)
-        
-        if last_messages:
-            return last_messages
-        else:
-            return "No response received from ChatGPT."
-            
+        screen_data = _read_screen_data()
+
+        if screen_data.get("status") == "success":
+            current_content = _conversation_text_from_data(screen_data)
+
+            # Clean up UI-only text fragments
+            cleaned_result = current_content.strip()
+            cleaned_result = (
+                cleaned_result
+                .replace("Regenerate", "")
+                .replace("Continue generating", "")
+                .replace("Edit prompt", "")
+                .replace("Copy", "")
+                .replace("▍", "")
+                .strip()
+            )
+
+            return cleaned_result if cleaned_result else "No response received from ChatGPT."
+        return "Failed to read ChatGPT screen."
+
     except Exception as e:
         return f"Error reading conversation: {str(e)}"
 
 
-async def get_chatgpt_response() -> str:
+async def get_chatgpt_response(previous_snapshot: str = "") -> str:
     """Get the latest response from ChatGPT after sending a message.
     
     Returns:
         ChatGPT's latest response text
     """
     try:
-        # Wait for response to complete
-        if wait_for_response_completion():
+        if wait_for_response_completion(previous_snapshot=previous_snapshot):
             return get_current_conversation_text()
-        else:
-            return "Timeout: ChatGPT response did not complete within the time limit."
+        return "Timeout: ChatGPT response did not complete within the time limit."
         
     except Exception as e:
         raise Exception(f"Failed to get response from ChatGPT: {str(e)}")
@@ -100,6 +119,9 @@ async def ask_chatgpt(prompt: str) -> str:
     await check_chatgpt_access()
     
     try:
+        # Snapshot before send so polling can detect the new response.
+        before_snapshot = get_current_conversation_text()
+
         # 프롬프트에서 개행 문자 제거 및 더블쿼츠를 싱글쿼츠로 변경
         cleaned_prompt = prompt.replace('\n', ' ').replace('\r', ' ').replace('"', "'").strip()
         
@@ -109,7 +131,7 @@ async def ask_chatgpt(prompt: str) -> str:
         automation.send_message_with_keystroke(cleaned_prompt)
         
         # Get the response
-        response = await get_chatgpt_response()
+        response = await get_chatgpt_response(previous_snapshot=before_snapshot)
         return response
         
     except Exception as e:
@@ -157,7 +179,7 @@ def setup_mcp_tools(mcp: FastMCP):
     async def get_chatgpt_response_tool() -> str:
         """Get the latest response from ChatGPT after sending a message."""
         return await get_chatgpt_response()
-    
+
     @mcp.tool()
     async def new_chatgpt_chat_tool() -> str:
         """Start a new chat conversation in ChatGPT."""
