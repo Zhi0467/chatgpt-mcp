@@ -49,30 +49,66 @@ Use a stable local install path instead of a transient `uvx` cache path.
 ### Step 1: Install the MCP server in a dedicated venv
 
 ```bash
-python3 -m venv ~/.local/opt/chatgpt-mcp
-~/.local/opt/chatgpt-mcp/bin/pip install "git+https://github.com/<your-github-user>/chatgpt-mcp.git@<commit-or-tag>"
+python3 -m venv "$HOME/.local/opt/chatgpt-mcp"
+"$HOME/.local/opt/chatgpt-mcp/bin/pip" install --upgrade pip
+"$HOME/.local/opt/chatgpt-mcp/bin/pip" install "git+https://github.com/Zhi0467/chatgpt-mcp.git@main"
 ```
 
-### Step 2: Configure Codex (`~/.codex/config.toml`)
+### Step 2: Configure Codex
 
-```toml
-[mcp_servers.chatgpt]
-command = "/Users/<your-user>/.local/opt/chatgpt-mcp/bin/chatgpt-mcp"
-args = []
-tool_timeout_sec = 300
+```bash
+codex mcp remove chatgpt >/dev/null 2>&1 || true
+codex mcp add chatgpt -- "$HOME/.local/opt/chatgpt-mcp/bin/chatgpt-mcp"
 ```
 
-### Step 3: Restart Codex
+### Step 3: Set MCP tool timeout to 300 seconds
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+config_path = Path.home() / ".codex" / "config.toml"
+chatgpt_bin = Path.home() / ".local/opt/chatgpt-mcp/bin/chatgpt-mcp"
+text = config_path.read_text() if config_path.exists() else ""
+
+section_pattern = re.compile(r"(?ms)^\[mcp_servers\.chatgpt\]\n(?:.*?)(?=^\[|\Z)")
+match = section_pattern.search(text)
+
+if not match:
+    section = (
+        "[mcp_servers.chatgpt]\n"
+        f'command = "{chatgpt_bin}"\n'
+    )
+    text = text.rstrip() + ("\n\n" if text.strip() else "") + section + "\n"
+    match = section_pattern.search(text)
+
+section = match.group(0)
+if re.search(r"(?m)^tool_timeout_sec\s*=", section):
+    section = re.sub(r"(?m)^tool_timeout_sec\s*=.*$", "tool_timeout_sec = 300", section)
+else:
+    if not section.endswith("\n"):
+        section += "\n"
+    section += "tool_timeout_sec = 300\n"
+
+updated = text[:match.start()] + section + text[match.end():]
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config_path.write_text(updated)
+print(f"Updated {config_path}")
+PY
+```
+
+### Step 4: Restart Codex
 
 Codex must be restarted after config changes so the new MCP command is loaded.
 
-### Step 4: Verify MCP wiring
+### Step 5: Verify MCP wiring
 
 ```bash
 codex mcp get chatgpt
 ```
 
-Then run a tiny tool call in Codex such as:
+Then run a tiny tool call in Codex, for example:
 - `Reply with exactly: OK.`
 
 If you still see transport disconnects, capture fresh MCP stderr from the failing run and confirm the configured command path still exists.
