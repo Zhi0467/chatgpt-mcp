@@ -1,7 +1,40 @@
 import subprocess
 import time
+from dataclasses import dataclass
+from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from chatgpt_mcp.chatgpt_automation import ChatGPTAutomation, check_chatgpt_access
+
+
+DEFAULT_MAX_WAIT_TIME = 1200
+
+
+@dataclass
+class PendingPrompt:
+    prompt: str
+    previous_snapshot: str
+    created_at: float
+
+
+_pending_prompt: Optional[PendingPrompt] = None
+
+
+def _set_pending_prompt(prompt: str, previous_snapshot: str) -> None:
+    global _pending_prompt
+    _pending_prompt = PendingPrompt(
+        prompt=prompt,
+        previous_snapshot=previous_snapshot,
+        created_at=time.time(),
+    )
+
+
+def _get_pending_prompt() -> Optional[PendingPrompt]:
+    return _pending_prompt
+
+
+def _clear_pending_prompt() -> None:
+    global _pending_prompt
+    _pending_prompt = None
 
 
 def _read_screen_data() -> dict:
@@ -20,10 +53,10 @@ def _conversation_text_from_data(screen_data: dict) -> str:
 
 def wait_for_response_completion(
     previous_snapshot: str = "",
-    max_wait_time: int = 120,
+    max_wait_time: int = DEFAULT_MAX_WAIT_TIME,
     check_interval: float = 1.5,
     stable_cycles_required: int = 2,
-) -> bool:
+) -> tuple[bool, str]:
     """Wait until a new response appears and stabilizes.
 
     The original completion detector is brittle across app/localization changes.
@@ -32,7 +65,7 @@ def wait_for_response_completion(
     """
     start_time = time.time()
     saw_change = previous_snapshot.strip() == ""
-    last_snapshot = ""
+    last_snapshot = previous_snapshot
     stable_cycles = 0
 
     while time.time() - start_time < max_wait_time:
@@ -55,14 +88,14 @@ def wait_for_response_completion(
         elif current_snapshot == last_snapshot:
             stable_cycles += 1
             if stable_cycles >= stable_cycles_required:
-                return True
+                return True, current_snapshot
         else:
             stable_cycles = 1
 
         last_snapshot = current_snapshot
         time.sleep(check_interval)
 
-    return False
+    return False, last_snapshot
 
 
 def get_current_conversation_text() -> str:
@@ -92,15 +125,36 @@ def get_current_conversation_text() -> str:
         return f"Error reading conversation: {str(e)}"
 
 
-async def get_chatgpt_response(previous_snapshot: str = "") -> str:
+async def get_chatgpt_response(previous_snapshot: str = "", max_wait_time: int = DEFAULT_MAX_WAIT_TIME) -> str:
     """Get the latest response from ChatGPT after sending a message.
     
     Returns:
         ChatGPT's latest response text
     """
     try:
-        if wait_for_response_completion(previous_snapshot=previous_snapshot):
-            return get_current_conversation_text()
+        pending = _get_pending_prompt()
+        effective_snapshot = previous_snapshot
+
+        if not effective_snapshot and pending:
+            effective_snapshot = pending.previous_snapshot
+
+        completed, _ = wait_for_response_completion(
+            previous_snapshot=effective_snapshot,
+            max_wait_time=max_wait_time,
+        )
+        if completed:
+            response = get_current_conversation_text()
+            _clear_pending_prompt()
+            return response
+
+        if pending:
+            waited = int(time.time() - pending.created_at)
+            return (
+                "Timeout: ChatGPT response is still pending in the UI. "
+                f"Elapsed wait: {waited}s. "
+                "Call get_chatgpt_response_tool again; do not open a new chat yet."
+            )
+
         return "Timeout: ChatGPT response did not complete within the time limit."
         
     except Exception as e:
@@ -117,6 +171,15 @@ async def ask_chatgpt(prompt: str) -> str:
         ChatGPT's response
     """
     await check_chatgpt_access()
+
+    pending = _get_pending_prompt()
+    if pending:
+        pending_age = int(time.time() - pending.created_at)
+        return (
+            "A previous ChatGPT response is still pending. "
+            f"Elapsed wait: {pending_age}s. "
+            "Call get_chatgpt_response_tool until completion before sending a new prompt."
+        )
     
     try:
         # Snapshot before send so polling can detect the new response.
@@ -129,9 +192,14 @@ async def ask_chatgpt(prompt: str) -> str:
         automation = ChatGPTAutomation()
         automation.activate_chatgpt()
         automation.send_message_with_keystroke(cleaned_prompt)
+
+        # Baseline after send prevents false completion on prompt-echo snapshots.
+        after_send_snapshot = get_current_conversation_text()
+        baseline_snapshot = after_send_snapshot if after_send_snapshot else before_snapshot
+        _set_pending_prompt(cleaned_prompt, baseline_snapshot)
         
         # Get the response
-        response = await get_chatgpt_response(previous_snapshot=before_snapshot)
+        response = await get_chatgpt_response(previous_snapshot=baseline_snapshot)
         return response
         
     except Exception as e:
@@ -145,6 +213,15 @@ async def new_chatgpt_chat() -> str:
         Success message or error
     """
     await check_chatgpt_access()
+
+    pending = _get_pending_prompt()
+    if pending:
+        pending_age = int(time.time() - pending.created_at)
+        return (
+            "Cannot open a new chat: previous ChatGPT response is still pending. "
+            f"Elapsed wait: {pending_age}s. "
+            "Call get_chatgpt_response_tool until completion first."
+        )
     
     try:
         automation = ChatGPTAutomation()
