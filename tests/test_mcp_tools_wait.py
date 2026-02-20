@@ -260,6 +260,21 @@ class PromptEchoGuardTests(unittest.TestCase):
         self.assertIn("prompt echo only", result)
         self.assertIsNotNone(mcp_tools._get_pending_prompt())
 
+    def test_get_response_keeps_pending_when_prompt_plus_domain_only_line_arrives(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        domain_only = f"{prompt}\nwww.example.com"
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, domain_only)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=domain_only
+        ), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=domain_only
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertIn("prompt echo only", result)
+        self.assertIsNotNone(mcp_tools._get_pending_prompt())
+
     def test_get_response_clears_pending_when_ui_reports_terminal_timeout(self) -> None:
         prompt = "Solve a hard math problem with proofs."
         timeout_only = f"{prompt}\nThe request timed out."
@@ -277,7 +292,7 @@ class PromptEchoGuardTests(unittest.TestCase):
 
     def test_get_response_returns_clean_answer_without_prompt_or_timeout_noise(self) -> None:
         prompt = "Solve a hard math problem with proofs."
-        raw_snapshot = f"assistant: Full derivation and final answer.\n{prompt}\nThe request timed out."
+        raw_snapshot = f"{prompt}\nassistant: Full derivation and final answer.\nThe request timed out."
         mcp_tools._set_pending_prompt(prompt, "baseline")
 
         with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, raw_snapshot)), patch.object(
@@ -289,6 +304,38 @@ class PromptEchoGuardTests(unittest.TestCase):
 
         self.assertEqual(result, "assistant: Full derivation and final answer.")
         self.assertIsNone(mcp_tools._get_pending_prompt())
+
+    def test_get_response_does_not_accept_stale_answer_before_prompt(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        stale_snapshot = "assistant: stale answer from another run.\nMCP_OLD_TOKEN\n" + prompt
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, stale_snapshot)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=stale_snapshot
+        ), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=stale_snapshot
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertIn("prompt echo only", result)
+        self.assertIsNotNone(mcp_tools._get_pending_prompt())
+
+    def test_get_response_ignores_old_terminal_failure_before_prompt(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        stale_timeout_snapshot = "The request timed out.\nassistant: old answer\n" + prompt
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(
+            mcp_tools, "wait_for_response_completion", return_value=(True, stale_timeout_snapshot)
+        ), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=stale_timeout_snapshot
+        ), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=stale_timeout_snapshot
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertIn("prompt echo only", result)
+        self.assertIsNotNone(mcp_tools._get_pending_prompt())
 
     def test_get_response_clears_pending_when_snapshot_lacks_sent_prompt(self) -> None:
         prompt = "Solve a hard math problem with proofs."
@@ -324,6 +371,11 @@ class SnapshotCleaningTests(unittest.TestCase):
 
     def test_clean_snapshot_removes_generic_gerund_ellipsis_progress_line(self) -> None:
         snapshot = "Prompt line\nExploring complex logarithm expressions and arctan identities…\nassistant: final answer"
+        cleaned = mcp_tools._clean_snapshot_text(snapshot)
+        self.assertEqual(cleaned, "Prompt line\nassistant: final answer")
+
+    def test_clean_snapshot_removes_domain_only_progress_line(self) -> None:
+        snapshot = "Prompt line\nwww.example.com\nassistant: final answer"
         cleaned = mcp_tools._clean_snapshot_text(snapshot)
         self.assertEqual(cleaned, "Prompt line\nassistant: final answer")
 

@@ -126,6 +126,12 @@ def _is_transient_ui_line(line: str) -> bool:
         return True
     if lowered.startswith("thought for ") or lowered.startswith("reasoned for "):
         return True
+    if len(normalized) <= 120 and re.match(r"^(https?://|www\.)\S+$", lowered):
+        # URL-only snippets can appear as interim retrieval progress before the final answer.
+        return True
+    if len(normalized) <= 120 and re.match(r"^[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]*)?$", lowered):
+        # Domain-only lines are often transient link previews, not completed answers.
+        return True
     if len(normalized) <= 180 and (lowered.endswith("...") or lowered.endswith("…")):
         # Generic progress one-liners often start with a gerund (e.g., "Exploring ...").
         if re.match(r"^[a-z]+ing\b", lowered):
@@ -181,6 +187,35 @@ def _remove_prompt_echo_artifacts(response: str, prompt: str) -> str:
             continue
         kept_lines.append(line)
     return "\n".join(kept_lines).strip()
+
+
+def _extract_post_prompt_snapshot(snapshot: str, prompt: str) -> tuple[bool, str]:
+    """Return text that appears after the latest visible instance of the sent prompt."""
+    if not snapshot or not prompt:
+        return False, ""
+
+    prompt_variants = [prompt, " ".join(prompt.split())]
+    for variant in prompt_variants:
+        if not variant:
+            continue
+        index = snapshot.rfind(variant)
+        if index != -1:
+            return True, snapshot[index + len(variant):].strip()
+
+    lines = [line.strip() for line in snapshot.splitlines() if line.strip()]
+    if not lines:
+        return False, ""
+
+    prompt_norm = _normalize_for_match(prompt)
+    for idx in range(len(lines) - 1, -1, -1):
+        line = lines[idx]
+        if _is_prompt_line(line, prompt):
+            return True, "\n".join(lines[idx + 1 :]).strip()
+        line_norm = _normalize_for_match(line)
+        if prompt_norm and prompt_norm in line_norm and len(line_norm) <= len(prompt_norm) + 48:
+            return True, "\n".join(lines[idx + 1 :]).strip()
+
+    return False, ""
 
 
 def _detect_terminal_ui_failure(snapshot: str) -> Optional[str]:
@@ -351,9 +386,12 @@ async def get_chatgpt_response(previous_snapshot: str = "", max_wait_time: int =
                         f"Elapsed wait: {waited}s. "
                         "Call get_chatgpt_response_tool again; do not send a new prompt yet."
                     )
-                response = _remove_prompt_echo_artifacts(raw_response or response, pending.prompt)
+                prompt_found, post_prompt_snapshot = _extract_post_prompt_snapshot(raw_response, pending.prompt)
+                scoped_snapshot = post_prompt_snapshot if prompt_found else raw_response
+                response_source = scoped_snapshot if prompt_found else (scoped_snapshot or response)
+                response = _remove_prompt_echo_artifacts(response_source, pending.prompt)
                 if not response or _is_prompt_echo_response(response, pending.prompt):
-                    terminal_failure = _detect_terminal_ui_failure(raw_response)
+                    terminal_failure = _detect_terminal_ui_failure(scoped_snapshot)
                     if terminal_failure:
                         _clear_pending_prompt()
                         return (
