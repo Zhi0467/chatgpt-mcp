@@ -218,6 +218,19 @@ class PromptEchoGuardTests(unittest.TestCase):
         self.assertEqual(result, final_response)
         self.assertIsNone(mcp_tools._get_pending_prompt())
 
+    def test_get_response_keeps_pending_when_prompt_plus_transient_progress_arrives(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        progress_only = f"{prompt}\nExploring complex logarithm expressions and arctan identities…"
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, progress_only)), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=progress_only
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertIn("prompt echo only", result)
+        self.assertIsNotNone(mcp_tools._get_pending_prompt())
+
 
 class SnapshotCleaningTests(unittest.TestCase):
     def test_clean_snapshot_removes_transient_lines(self) -> None:
@@ -227,6 +240,11 @@ class SnapshotCleaningTests(unittest.TestCase):
 
     def test_clean_snapshot_removes_short_progress_ellipsis_lines(self) -> None:
         snapshot = "Prompt line\nComputing symbolic expression with X, Y variables…\nassistant: final answer"
+        cleaned = mcp_tools._clean_snapshot_text(snapshot)
+        self.assertEqual(cleaned, "Prompt line\nassistant: final answer")
+
+    def test_clean_snapshot_removes_generic_gerund_ellipsis_progress_line(self) -> None:
+        snapshot = "Prompt line\nExploring complex logarithm expressions and arctan identities…\nassistant: final answer"
         cleaned = mcp_tools._clean_snapshot_text(snapshot)
         self.assertEqual(cleaned, "Prompt line\nassistant: final answer")
 

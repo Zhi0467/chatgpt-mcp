@@ -95,8 +95,13 @@ def _is_transient_ui_line(line: str) -> bool:
         return True
     if lowered.startswith("thought for ") or lowered.startswith("reasoned for "):
         return True
-    if len(normalized) <= 140 and (lowered.endswith("...") or lowered.endswith("…")):
-        if re.match(r"^(computing|calculating|deriving|checking|verifying|working|thinking|analyzing|searching|drafting)\b", lowered):
+    if len(normalized) <= 180 and (lowered.endswith("...") or lowered.endswith("…")):
+        # Generic progress one-liners often start with a gerund (e.g., "Exploring ...").
+        if re.match(r"^[a-z]+ing\b", lowered):
+            return True
+    if len(normalized) <= 100 and re.match(r"^[a-z]+ing\b", lowered):
+        # Short gerund-only status line without sentence punctuation.
+        if not re.search(r"[.!?=:]", normalized):
             return True
     return bool(re.match(r"^(thinking|analyzing|searching|drafting|working)\b", lowered)) and len(normalized) <= 80
 
@@ -138,6 +143,11 @@ def _is_prompt_echo_response(response: str, prompt: str) -> bool:
         return False
     if normalized_response == normalized_prompt:
         return True
+
+    if normalized_prompt in normalized_response:
+        suffix = normalized_response.replace(normalized_prompt, "", 1).strip(" :-")
+        if suffix and _is_transient_ui_line(suffix):
+            return True
 
     # Allow tiny wrappers around the prompt (for example quotes/prefixes).
     return normalized_prompt in normalized_response and len(normalized_response) <= len(normalized_prompt) + 24
