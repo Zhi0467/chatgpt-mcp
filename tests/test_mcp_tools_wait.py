@@ -305,6 +305,21 @@ class PromptEchoGuardTests(unittest.TestCase):
         self.assertEqual(result, "assistant: Full derivation and final answer.")
         self.assertIsNone(mcp_tools._get_pending_prompt())
 
+    def test_get_response_cleans_inline_prompt_prefix_when_snapshot_is_single_line(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        inline_snapshot = f"{prompt} assistant: Full derivation and final answer."
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, inline_snapshot)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=inline_snapshot
+        ), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=inline_snapshot
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertEqual(result, "assistant: Full derivation and final answer.")
+        self.assertIsNone(mcp_tools._get_pending_prompt())
+
     def test_get_response_does_not_accept_stale_answer_before_prompt(self) -> None:
         prompt = "Solve a hard math problem with proofs."
         stale_snapshot = "assistant: stale answer from another run.\nMCP_OLD_TOKEN\n" + prompt
@@ -391,6 +406,12 @@ class SnapshotCleaningTests(unittest.TestCase):
     def test_remove_prompt_echo_artifacts_strips_prompt_line(self) -> None:
         prompt = "Please solve this exactly."
         raw_snapshot = f"assistant: final answer\nPrompt: {prompt}\nThe request timed out."
+        cleaned = mcp_tools._remove_prompt_echo_artifacts(raw_snapshot, prompt)
+        self.assertEqual(cleaned, "assistant: final answer")
+
+    def test_remove_prompt_echo_artifacts_strips_inline_prompt_prefix(self) -> None:
+        prompt = "Please solve this exactly."
+        raw_snapshot = f"Prompt: {prompt} assistant: final answer"
         cleaned = mcp_tools._remove_prompt_echo_artifacts(raw_snapshot, prompt)
         self.assertEqual(cleaned, "assistant: final answer")
 

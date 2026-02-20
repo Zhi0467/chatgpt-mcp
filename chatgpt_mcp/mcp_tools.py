@@ -172,9 +172,38 @@ def _is_prompt_line(line: str, prompt: str) -> bool:
     return False
 
 
+def _strip_inline_prompt_prefix(response: str, prompt: str) -> str:
+    """Strip a leading prompt prefix when prompt and answer share one line."""
+    if not response or not prompt:
+        return response
+
+    trimmed = response.lstrip()
+    prompt_variants = [prompt, " ".join(prompt.split())]
+    labeled_prefixes = ("", "Prompt: ", "User: ", "You: ", "prompt: ", "user: ", "you: ")
+
+    for variant in prompt_variants:
+        candidate = variant.strip()
+        if not candidate:
+            continue
+        for label in labeled_prefixes:
+            prefix = f"{label}{candidate}"
+            if trimmed.startswith(prefix):
+                return trimmed[len(prefix) :].lstrip(" \n\r\t:-")
+
+    words = [re.escape(token) for token in prompt.split()]
+    if len(words) >= 4:
+        fuzzy_pattern = r"^\s*(?:prompt:\s*|user:\s*|you:\s*)?" + r"\s+".join(words)
+        fuzzy_match = re.match(fuzzy_pattern, response, flags=re.IGNORECASE)
+        if fuzzy_match:
+            return response[fuzzy_match.end() :].lstrip(" \n\r\t:-")
+
+    return response
+
+
 def _remove_prompt_echo_artifacts(response: str, prompt: str) -> str:
     """Strip prompt-only lines and transient UI noise from a response snapshot."""
-    cleaned = _clean_snapshot_text(response)
+    prefix_trimmed = _strip_inline_prompt_prefix(response, prompt)
+    cleaned = _clean_snapshot_text(prefix_trimmed)
     if not cleaned:
         return ""
 
