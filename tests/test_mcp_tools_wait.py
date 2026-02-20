@@ -191,6 +191,26 @@ class PendingGuardrailTests(unittest.TestCase):
             result = asyncio.run(mcp_tools.ask_chatgpt("Please reply with one word: ready"))
         self.assertIn("Rejected prompt", result)
 
+    def test_ask_reports_when_prompt_not_visible_after_send(self) -> None:
+        class FakeAutomation:
+            def activate_chatgpt(self):
+                return None
+
+            def send_message_with_keystroke(self, _message):
+                return None
+
+        with patch.object(mcp_tools, "check_chatgpt_access", new=AsyncMock(return_value=True)), patch.object(
+            mcp_tools, "_read_current_snapshot", return_value="older snapshot"
+        ), patch.object(
+            mcp_tools, "_resolve_post_send_baseline", return_value="older snapshot"
+        ), patch.object(
+            mcp_tools, "ChatGPTAutomation", return_value=FakeAutomation()
+        ):
+            result = asyncio.run(mcp_tools.ask_chatgpt("Compute a nontrivial result with proof."))
+
+        self.assertIn("Failed to confirm the prompt appeared", result)
+        self.assertIsNone(mcp_tools._get_pending_prompt())
+
 
 class PromptEchoGuardTests(unittest.TestCase):
     def tearDown(self) -> None:
@@ -201,6 +221,8 @@ class PromptEchoGuardTests(unittest.TestCase):
         mcp_tools._set_pending_prompt(prompt, "baseline")
 
         with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, prompt)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=prompt
+        ), patch.object(
             mcp_tools, "get_current_conversation_text", return_value=prompt
         ):
             result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
@@ -214,11 +236,13 @@ class PromptEchoGuardTests(unittest.TestCase):
         mcp_tools._set_pending_prompt(prompt, "baseline")
 
         with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, final_response)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=final_response
+        ), patch.object(
             mcp_tools, "get_current_conversation_text", return_value=final_response
         ):
             result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
 
-        self.assertEqual(result, final_response)
+        self.assertEqual(result, "assistant: Full derivation and final answer.")
         self.assertIsNone(mcp_tools._get_pending_prompt())
 
     def test_get_response_keeps_pending_when_prompt_plus_transient_progress_arrives(self) -> None:
@@ -227,12 +251,64 @@ class PromptEchoGuardTests(unittest.TestCase):
         mcp_tools._set_pending_prompt(prompt, "baseline")
 
         with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, progress_only)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=progress_only
+        ), patch.object(
             mcp_tools, "get_current_conversation_text", return_value=progress_only
         ):
             result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
 
         self.assertIn("prompt echo only", result)
         self.assertIsNotNone(mcp_tools._get_pending_prompt())
+
+    def test_get_response_clears_pending_when_ui_reports_terminal_timeout(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        timeout_only = f"{prompt}\nThe request timed out."
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, timeout_only)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=timeout_only
+        ), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=timeout_only
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertIn("terminal UI failure", result)
+        self.assertIsNone(mcp_tools._get_pending_prompt())
+
+    def test_get_response_returns_clean_answer_without_prompt_or_timeout_noise(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        raw_snapshot = f"assistant: Full derivation and final answer.\n{prompt}\nThe request timed out."
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, raw_snapshot)), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=raw_snapshot
+        ), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=raw_snapshot
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertEqual(result, "assistant: Full derivation and final answer.")
+        self.assertIsNone(mcp_tools._get_pending_prompt())
+
+    def test_get_response_clears_pending_when_snapshot_lacks_sent_prompt(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        unrelated_snapshot = "Assistant response from an unrelated chat."
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+        pending = mcp_tools._get_pending_prompt()
+        assert pending is not None
+        pending.created_at -= 120
+
+        with patch.object(
+            mcp_tools, "wait_for_response_completion", return_value=(True, unrelated_snapshot)
+        ), patch.object(
+            mcp_tools, "_read_current_raw_snapshot", return_value=unrelated_snapshot
+        ), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=unrelated_snapshot
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertIn("Pending prompt was cleared", result)
+        self.assertIsNone(mcp_tools._get_pending_prompt())
 
 
 class SnapshotCleaningTests(unittest.TestCase):
@@ -250,6 +326,21 @@ class SnapshotCleaningTests(unittest.TestCase):
         snapshot = "Prompt line\nExploring complex logarithm expressions and arctan identities…\nassistant: final answer"
         cleaned = mcp_tools._clean_snapshot_text(snapshot)
         self.assertEqual(cleaned, "Prompt line\nassistant: final answer")
+
+    def test_clean_snapshot_removes_network_timeout_noise(self) -> None:
+        snapshot = (
+            "Prompt line\nassistant: final answer\n"
+            "Network connection lost. Attempting to reconnect…\n"
+            "The request timed out."
+        )
+        cleaned = mcp_tools._clean_snapshot_text(snapshot)
+        self.assertEqual(cleaned, "Prompt line\nassistant: final answer")
+
+    def test_remove_prompt_echo_artifacts_strips_prompt_line(self) -> None:
+        prompt = "Please solve this exactly."
+        raw_snapshot = f"assistant: final answer\nPrompt: {prompt}\nThe request timed out."
+        cleaned = mcp_tools._remove_prompt_echo_artifacts(raw_snapshot, prompt)
+        self.assertEqual(cleaned, "assistant: final answer")
 
     def test_is_prompt_echo_response_handles_small_wrapper(self) -> None:
         self.assertTrue(mcp_tools._is_prompt_echo_response("Prompt: solve this.", "solve this."))

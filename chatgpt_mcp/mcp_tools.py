@@ -24,6 +24,17 @@ TRANSIENT_UI_LINES = {
     "drafting",
     "working",
 }
+TRANSIENT_UI_SUBSTRINGS = (
+    "network connection lost",
+    "attempting to reconnect",
+    "the request timed out",
+    "something went wrong",
+    "an error occurred",
+)
+TERMINAL_UI_FAILURE_SUBSTRINGS = (
+    "the request timed out",
+    "response failed",
+)
 READINESS_PROBE_PATTERNS = (
     r"\breply with exactly\b",
     r"\banswer with exactly\b",
@@ -77,10 +88,24 @@ def _conversation_text_from_data(screen_data: dict) -> str:
     return _clean_snapshot_text(raw_snapshot)
 
 
+def _raw_conversation_text_from_data(screen_data: dict) -> str:
+    """Convert screen data into raw unfiltered text snapshot."""
+    if screen_data.get("status") != "success":
+        return ""
+    texts = screen_data.get("texts", [])
+    return "\n".join(str(text) for text in texts).strip()
+
+
 def _read_current_snapshot() -> str:
     """Read and normalize the current ChatGPT conversation snapshot."""
     screen_data = _read_screen_data()
     return _conversation_text_from_data(screen_data)
+
+
+def _read_current_raw_snapshot() -> str:
+    """Read the current raw (unfiltered) ChatGPT conversation snapshot."""
+    screen_data = _read_screen_data()
+    return _raw_conversation_text_from_data(screen_data)
 
 
 def _is_transient_ui_line(line: str) -> bool:
@@ -89,8 +114,13 @@ def _is_transient_ui_line(line: str) -> bool:
     if not normalized:
         return False
 
+    if normalized.replace("￼", "").strip() == "":
+        return True
+
     lowered = normalized.lower()
     if lowered in TRANSIENT_UI_LINES:
+        return True
+    if any(fragment in lowered for fragment in TRANSIENT_UI_SUBSTRINGS):
         return True
     if normalized == "▍":
         return True
@@ -120,6 +150,48 @@ def _clean_snapshot_text(snapshot: str) -> str:
     return "\n".join(cleaned_lines).strip()
 
 
+def _is_prompt_line(line: str, prompt: str) -> bool:
+    """Return True when a line is effectively just the sent prompt."""
+    line_norm = _normalize_for_match(line)
+    prompt_norm = _normalize_for_match(prompt)
+    if not line_norm or not prompt_norm:
+        return False
+    if line_norm == prompt_norm:
+        return True
+
+    prompt_prefixes = ("prompt: ", "user: ", "you: ")
+    for prefix in prompt_prefixes:
+        if line_norm == f"{prefix}{prompt_norm}":
+            return True
+    return False
+
+
+def _remove_prompt_echo_artifacts(response: str, prompt: str) -> str:
+    """Strip prompt-only lines and transient UI noise from a response snapshot."""
+    cleaned = _clean_snapshot_text(response)
+    if not cleaned:
+        return ""
+
+    kept_lines = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if _is_prompt_line(line, prompt):
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines).strip()
+
+
+def _detect_terminal_ui_failure(snapshot: str) -> Optional[str]:
+    """Detect terminal request failures shown in ChatGPT UI."""
+    lowered = snapshot.lower()
+    for token in TERMINAL_UI_FAILURE_SUBSTRINGS:
+        if token in lowered:
+            return token
+    return None
+
+
 def _is_readiness_probe_prompt(prompt: str) -> bool:
     """Detect non-task readiness probes that should not be sent to ChatGPT."""
     normalized = " ".join(prompt.lower().split())
@@ -133,6 +205,15 @@ def _is_readiness_probe_prompt(prompt: str) -> bool:
 def _normalize_for_match(text: str) -> str:
     """Normalize text for robust prompt/response echo matching."""
     return " ".join(str(text).strip().lower().split())
+
+
+def _snapshot_contains_prompt(snapshot: str, prompt: str) -> bool:
+    """Return True when snapshot text contains the sent prompt."""
+    normalized_snapshot = _normalize_for_match(snapshot)
+    normalized_prompt = _normalize_for_match(prompt)
+    if not normalized_snapshot or not normalized_prompt:
+        return False
+    return normalized_prompt in normalized_snapshot
 
 
 def _is_prompt_echo_response(response: str, prompt: str) -> bool:
@@ -170,9 +251,7 @@ def _resolve_post_send_baseline(before_snapshot: str, prompt: str, max_wait: flo
 
     if latest_snapshot:
         return latest_snapshot
-    if before_snapshot:
-        return f"{before_snapshot}\n{prompt}".strip()
-    return prompt
+    return before_snapshot
 
 
 def wait_for_response_completion(
@@ -255,14 +334,38 @@ async def get_chatgpt_response(previous_snapshot: str = "", max_wait_time: int =
             max_wait_time=max_wait_time,
         )
         if completed:
+            raw_response = _read_current_raw_snapshot()
             response = get_current_conversation_text()
-            if pending and _is_prompt_echo_response(response, pending.prompt):
-                waited = int(time.time() - pending.created_at)
-                return (
-                    "ChatGPT response is still pending in the UI (prompt echo only). "
-                    f"Elapsed wait: {waited}s. "
-                    "Call get_chatgpt_response_tool again; do not send a new prompt yet."
-                )
+            if pending:
+                if not _snapshot_contains_prompt(raw_response, pending.prompt):
+                    waited = int(time.time() - pending.created_at)
+                    if waited >= 60:
+                        _clear_pending_prompt()
+                        return (
+                            "ChatGPT snapshot does not include the sent prompt after waiting; "
+                            "this suggests the message may not have been submitted. "
+                            "Pending prompt was cleared; resend the prompt."
+                        )
+                    return (
+                        "ChatGPT response is still pending in the UI (sent prompt not visible yet). "
+                        f"Elapsed wait: {waited}s. "
+                        "Call get_chatgpt_response_tool again; do not send a new prompt yet."
+                    )
+                response = _remove_prompt_echo_artifacts(raw_response or response, pending.prompt)
+                if not response or _is_prompt_echo_response(response, pending.prompt):
+                    terminal_failure = _detect_terminal_ui_failure(raw_response)
+                    if terminal_failure:
+                        _clear_pending_prompt()
+                        return (
+                            "ChatGPT reported a terminal UI failure before completing the answer "
+                            f"({terminal_failure}). Pending prompt was cleared; resend the prompt."
+                        )
+                    waited = int(time.time() - pending.created_at)
+                    return (
+                        "ChatGPT response is still pending in the UI (prompt echo only). "
+                        f"Elapsed wait: {waited}s. "
+                        "Call get_chatgpt_response_tool again; do not send a new prompt yet."
+                    )
             _clear_pending_prompt()
             return response
 
@@ -319,6 +422,11 @@ async def ask_chatgpt(prompt: str) -> str:
 
         # Baseline after send prevents false completion on prompt-echo snapshots.
         baseline_snapshot = _resolve_post_send_baseline(before_snapshot=before_snapshot, prompt=cleaned_prompt)
+        if not _snapshot_contains_prompt(baseline_snapshot, cleaned_prompt):
+            return (
+                "Failed to confirm the prompt appeared in ChatGPT UI after send. "
+                "Please retry once ChatGPT input focus is stable."
+            )
         _set_pending_prompt(cleaned_prompt, baseline_snapshot)
         
         # Get the response
