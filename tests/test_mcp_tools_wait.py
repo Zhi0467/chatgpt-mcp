@@ -189,11 +189,52 @@ class PendingGuardrailTests(unittest.TestCase):
         self.assertIn("Rejected prompt", result)
 
 
+class PromptEchoGuardTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        mcp_tools._clear_pending_prompt()
+
+    def test_get_response_keeps_pending_when_snapshot_is_prompt_echo(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, prompt)), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=prompt
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertIn("prompt echo only", result)
+        self.assertIsNotNone(mcp_tools._get_pending_prompt())
+
+    def test_get_response_clears_pending_when_non_echo_answer_arrives(self) -> None:
+        prompt = "Solve a hard math problem with proofs."
+        final_response = f"{prompt}\nassistant: Full derivation and final answer."
+        mcp_tools._set_pending_prompt(prompt, "baseline")
+
+        with patch.object(mcp_tools, "wait_for_response_completion", return_value=(True, final_response)), patch.object(
+            mcp_tools, "get_current_conversation_text", return_value=final_response
+        ):
+            result = asyncio.run(mcp_tools.get_chatgpt_response(previous_snapshot="baseline"))
+
+        self.assertEqual(result, final_response)
+        self.assertIsNone(mcp_tools._get_pending_prompt())
+
+
 class SnapshotCleaningTests(unittest.TestCase):
     def test_clean_snapshot_removes_transient_lines(self) -> None:
         snapshot = "Prompt line\nThinking\nCopy\nassistant: real answer"
         cleaned = mcp_tools._clean_snapshot_text(snapshot)
         self.assertEqual(cleaned, "Prompt line\nassistant: real answer")
+
+    def test_clean_snapshot_removes_short_progress_ellipsis_lines(self) -> None:
+        snapshot = "Prompt line\nComputing symbolic expression with X, Y variables…\nassistant: final answer"
+        cleaned = mcp_tools._clean_snapshot_text(snapshot)
+        self.assertEqual(cleaned, "Prompt line\nassistant: final answer")
+
+    def test_is_prompt_echo_response_handles_small_wrapper(self) -> None:
+        self.assertTrue(mcp_tools._is_prompt_echo_response("Prompt: solve this.", "solve this."))
+        self.assertFalse(
+            mcp_tools._is_prompt_echo_response("solve this.\nassistant: detailed answer", "solve this.")
+        )
 
 
 if __name__ == "__main__":
