@@ -1,12 +1,36 @@
 import subprocess
 import time
+import re
 from dataclasses import dataclass
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from chatgpt_mcp.chatgpt_automation import ChatGPTAutomation, check_chatgpt_access
 
 
-DEFAULT_MAX_WAIT_TIME = 1200
+DEFAULT_MAX_WAIT_TIME = 1800
+TRANSIENT_UI_LINES = {
+    "regenerate",
+    "continue generating",
+    "edit prompt",
+    "copy",
+    "thinking",
+    "thinking...",
+    "thinking…",
+    "analyzing",
+    "analyzing...",
+    "searching",
+    "searching...",
+    "drafting",
+    "working",
+}
+READINESS_PROBE_PATTERNS = (
+    r"\breply with exactly\b",
+    r"\banswer with exactly\b",
+    r"\banswer with one word\b",
+    r"\bone word:\s*(ready|working|ok|okay|mcp_ok)\b",
+    r"\bmcp_ok\b",
+)
+READINESS_PROBE_MAX_CHARS = 180
 
 
 @dataclass
@@ -48,7 +72,47 @@ def _conversation_text_from_data(screen_data: dict) -> str:
     if screen_data.get("status") != "success":
         return ""
     texts = screen_data.get("texts", [])
-    return "\n".join(texts).strip()
+    raw_snapshot = "\n".join(str(text) for text in texts).strip()
+    return _clean_snapshot_text(raw_snapshot)
+
+
+def _is_transient_ui_line(line: str) -> bool:
+    """Detect non-answer UI/status lines that should not trigger completion."""
+    normalized = line.strip()
+    if not normalized:
+        return False
+
+    lowered = normalized.lower()
+    if lowered in TRANSIENT_UI_LINES:
+        return True
+    if normalized == "▍":
+        return True
+    if lowered.startswith("thought for ") or lowered.startswith("reasoned for "):
+        return True
+    return bool(re.match(r"^(thinking|analyzing|searching|drafting|working)\b", lowered)) and len(normalized) <= 80
+
+
+def _clean_snapshot_text(snapshot: str) -> str:
+    """Normalize UI snapshots by removing transient/status-only lines."""
+    cleaned_lines = []
+    for raw_line in snapshot.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if _is_transient_ui_line(line):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
+def _is_readiness_probe_prompt(prompt: str) -> bool:
+    """Detect non-task readiness probes that should not be sent to ChatGPT."""
+    normalized = " ".join(prompt.lower().split())
+    if not normalized:
+        return False
+    if len(normalized) > READINESS_PROBE_MAX_CHARS:
+        return False
+    return any(re.search(pattern, normalized) for pattern in READINESS_PROBE_PATTERNS)
 
 
 def wait_for_response_completion(
@@ -104,20 +168,7 @@ def get_current_conversation_text() -> str:
         screen_data = _read_screen_data()
 
         if screen_data.get("status") == "success":
-            current_content = _conversation_text_from_data(screen_data)
-
-            # Clean up UI-only text fragments
-            cleaned_result = current_content.strip()
-            cleaned_result = (
-                cleaned_result
-                .replace("Regenerate", "")
-                .replace("Continue generating", "")
-                .replace("Edit prompt", "")
-                .replace("Copy", "")
-                .replace("▍", "")
-                .strip()
-            )
-
+            cleaned_result = _conversation_text_from_data(screen_data)
             return cleaned_result if cleaned_result else "No response received from ChatGPT."
         return "Failed to read ChatGPT screen."
 
@@ -187,6 +238,11 @@ async def ask_chatgpt(prompt: str) -> str:
 
         # 프롬프트에서 개행 문자 제거 및 더블쿼츠를 싱글쿼츠로 변경
         cleaned_prompt = prompt.replace('\n', ' ').replace('\r', ' ').replace('"', "'").strip()
+        if _is_readiness_probe_prompt(cleaned_prompt):
+            return (
+                "Rejected prompt: looks like a readiness probe. "
+                "Send one task-relevant prompt and wait via get_chatgpt_response_tool."
+            )
         
         # Activate ChatGPT and send message using keystroke
         automation = ChatGPTAutomation()
