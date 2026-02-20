@@ -127,7 +127,7 @@ class WaitForResponseCompletionTests(unittest.TestCase):
     def test_wait_default_supports_very_long_delays(self) -> None:
         baseline = "user: perform deep architecture critique"
         final_snapshot = f"{baseline}\nassistant: full critique complete"
-        polls_before_change = int(1700 / 1.5)
+        polls_before_change = int(2300 / 1.5)
         poll_count = {"value": 0}
         now = {"value": 0.0}
 
@@ -164,7 +164,10 @@ class WaitForResponseCompletionTests(unittest.TestCase):
 
         self.assertTrue(completed)
         self.assertEqual(snapshot, final_snapshot)
-        self.assertGreaterEqual(now["value"], 1700.0)
+        self.assertGreaterEqual(now["value"], 2300.0)
+
+    def test_default_wait_is_at_least_forty_minutes(self) -> None:
+        self.assertGreaterEqual(mcp_tools.DEFAULT_MAX_WAIT_TIME, 2400)
 
 
 class PendingGuardrailTests(unittest.TestCase):

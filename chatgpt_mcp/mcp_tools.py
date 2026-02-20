@@ -7,7 +7,8 @@ from mcp.server.fastmcp import FastMCP
 from chatgpt_mcp.chatgpt_automation import ChatGPTAutomation, check_chatgpt_access
 
 
-DEFAULT_MAX_WAIT_TIME = 1800
+# Keep polling up to 40 minutes so long-running ChatGPT responses can be captured.
+DEFAULT_MAX_WAIT_TIME = 2400
 TRANSIENT_UI_LINES = {
     "regenerate",
     "continue generating",
